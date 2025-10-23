@@ -1,0 +1,8 @@
+/.python-version
+/.ruff_cache
+/.venv
+/.vscode
+/__pycache__
+/analysis
+/detectors.yaml
+/results

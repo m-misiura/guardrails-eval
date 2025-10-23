@@ -1,0 +1,32 @@
+# Detectors Configuration
+# Copy this file to detectors.yaml and configure your detectors
+
+detectors:
+  # Example 1: Detector with Bearer token authentication
+  # Usage: export DETECTOR_TOKEN=$(oc whoami -t)
+  - name: "my-detector"
+    config:
+      api_url: "https://your-detector-route.apps.cluster.com"
+      detector_id: "language_detector"  # Required: detector-id header value
+      threshold: 0.5  # Score threshold (0.0 = any detection counts)
+      timeout: 30
+      auth_token_env: "DETECTOR_TOKEN"  # Optional: environment variable for bearer token
+
+  # Example 2: Detector without authentication
+  - name: "local-detector"
+    config:
+      api_url: "http://localhost:8000"
+      detector_id: "my_detector"
+      threshold: 0.5
+      timeout: 30
+
+# Benign Prompt Generator Configuration (Optional)
+# Uses an LLM to generate category-specific benign prompts for testing false positive rates
+# Only required if you use --benign_prompts > 0
+benign_llm:
+  api_url: "https://model-name.apps.prod.rhoai.rh-aiservices-bu.com:443/v1"
+  model_name: "org_name/model_name"
+  api_key_env: "BENIGN_LLM_API_KEY"  # Environment variable containing API key
+  temperature: 0.7
+  max_tokens: 150
+  timeout: 30
