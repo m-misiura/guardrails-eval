@@ -46,7 +46,9 @@ def print_probes(probe_filter: Optional[str] = None, tag_filter: Optional[str] =
     # Get probes based on filter
     if tag_filter:
         print(f"Filtering by tag: {tag_filter}\n")
-        probes = extractor.list_probes_by_tag(tag_filter)
+        probes, rejected = extractor.parse_probe_spec("all", tag_filter=tag_filter)
+        if rejected:
+            print(f"⚠️  Unknown probes: {rejected}\n")
     elif probe_filter and probe_filter.lower() not in ("all", "*", ""):
         print(f"Filtering by spec: {probe_filter}\n")
         probes, rejected = extractor.parse_probe_spec(probe_filter)
@@ -110,14 +112,31 @@ def run_benchmark(args):
     llm_config = load_llm_config(args.detectors)
 
     # Extract adversarial prompts
-    extractor = ProbeExtractor(verbose=args.verbose > 0)
+    deduplicate = not args.no_deduplicate
+
+    extractor = ProbeExtractor(
+        verbose=args.verbose > 0,
+        include_inactive=args.include_inactive,
+        deduplicate=deduplicate
+    )
     prompts = extractor.extract_prompts(
         probe_spec=args.probes, tag_filter=args.probe_tags
     )
 
+    if args.include_inactive:
+        print("⚠️  Including inactive 'Full' probes - this may extract thousands of prompts")
+
+    if not deduplicate:
+        print("⚠️  Deduplication disabled - keeping all prompts including duplicates")
+
     if not prompts:
         print("❌ No prompts extracted. Check your probe filters.")
         return
+
+    # Save prompt count
+    adversarial_count = len(prompts)
+    unique_str = "unique " if deduplicate else ""
+    print(f"📊 Extracted {adversarial_count} {unique_str}adversarial prompts from {len(set(p.probe_name for p in prompts))} probes")
 
     # Add benign prompts if requested
     if args.benign_prompts:

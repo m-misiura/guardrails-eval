@@ -33,8 +33,10 @@ class ProbePrompt:
 class ProbeExtractor:
     """Extracts prompts from garak probes with multiple filtering options."""
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, include_inactive: bool = False, deduplicate: bool = True):
         self.verbose = verbose
+        self.include_inactive = include_inactive  # Include inactive "Full" probes
+        self.deduplicate = deduplicate  # Remove duplicate prompts within each probe
         self.logger = logging.getLogger("probe_extractor")
         self._garak_loaded = False
         self._plugins = None
@@ -65,94 +67,71 @@ class ProbeExtractor:
         probe_names = [name for name, active in all_probes]
         return sorted(probe_names)
 
-    def list_probes_by_tag(self, tag_filter: str) -> List[str]:
-        """
-        List probes matching a tag filter.
-
-        Args:
-            tag_filter: Tag to filter by (e.g., "owasp", "owasp:llm01", "avid-effect")
-
-        Returns:
-            List of matching probe names
-        """
-        self._load_garak()
-        all_probes = self.list_all_probes()
-        matching = []
-
-        for probe_name in all_probes:
-            try:
-                plugin_name = (
-                    probe_name
-                    if probe_name.startswith("probes.")
-                    else f"probes.{probe_name}"
-                )
-                probe = self._plugins.load_plugin(plugin_name, config_root=self._config)
-                if hasattr(probe, "tags") and probe.tags:
-                    if any(tag_filter.lower() in tag.lower() for tag in probe.tags):
-                        matching.append(probe_name)
-            except Exception as e:
-                self.logger.debug(f"Failed to load probe {probe_name}: {e}")
-                continue
-        return sorted(matching)
-
     def parse_probe_spec(
         self, probe_spec: str, tag_filter: Optional[str] = None
     ) -> Tuple[List[str], List[str]]:
         """
-        Parse probe spec like garak does.
+        Parse probe spec deterministically using garak's parse_plugin_spec.
 
         Args:
             probe_spec: Comma-separated probe names, "all", or specific probe.class
-            tag_filter: Optional tag filter to apply
+            tag_filter: Optional tag filter to apply (e.g., "owasp:llm01")
 
         Returns:
-            Tuple of (selected_probes, rejected_probes)
+            Tuple of (selected_probes, rejected_probes) - both sorted for determinism
         """
         self._load_garak()
-        try:
-            spec = (
-                probe_spec
-                if probe_spec and probe_spec.lower() not in ("", "all")
-                else "*"
-            )
-            selected, rejected = self._config.parse_plugin_spec(
-                spec, "probes", tag_filter
-            )
-            return selected, rejected
-        except Exception as e:
-            self.logger.warning(f"Failed to parse probe spec with garak: {e}")
-            if self.verbose:
-                import traceback
 
-                traceback.print_exc()
-            # Fallback only if garak fails
-            if not probe_spec or probe_spec.lower() in ("", "all", "*"):
-                return self.list_all_probes(), []
-            return self._simple_parse_probe_spec(probe_spec), []
+        spec = (
+            probe_spec
+            if probe_spec and probe_spec.lower() not in ("", "all")
+            else "*"
+        )
 
-    def _simple_parse_probe_spec(self, probe_spec: str) -> List[str]:
-        """Simple fallback probe spec parsing."""
-        all_probes = self.list_all_probes()
-        requested = [p.strip() for p in probe_spec.split(",")]
-        matched = []
-        for req in requested:
-            if req in all_probes:
-                matched.append(req)
-            else:
-                module_pattern = f".{req}."
-                partial = [
-                    p
-                    for p in all_probes
-                    if module_pattern in p or p.startswith(f"probes.{req}.")
-                ]
+        # Use garak's parse_plugin_spec to get active probes efficiently
+        selected, rejected = self._config.parse_plugin_spec(
+            spec, category="probes", probe_tag_filter=tag_filter or ""
+        )
 
-                if partial:
-                    matched.extend(partial)
+        # If include_inactive, add inactive probes that match criteria
+        if self.include_inactive:
+            import importlib
+
+            # Get all probes and filter for inactive ones
+            all_probes = self._plugins.enumerate_plugins("probes")
+            inactive_probes = [name for name, is_active in all_probes if not is_active]
+
+            for probe_name in inactive_probes:
+                # If tag filter specified, check if probe matches
+                if tag_filter:
+                    try:
+                        # Import probe CLASS (not instance) to check tags
+                        # Format: "probes.module.ClassName" -> "garak.probes.module"
+                        clean_name = probe_name.replace("probes.", "", 1)
+                        parts = clean_name.split(".")
+                        module_path = f"garak.probes.{parts[0]}"
+                        class_name = ".".join(parts[1:]) if len(parts) > 1 else parts[0]
+
+                        probe_module = importlib.import_module(module_path)
+                        probe_class = getattr(probe_module, class_name)
+
+                        # Check class tags (no instantiation needed)
+                        probe_tags = getattr(probe_class, 'tags', [])
+                        has_matching_tag = any(tag.startswith(tag_filter) for tag in probe_tags)
+
+                        if has_matching_tag:
+                            selected.append(probe_name)
+                            self.logger.info(f"Including inactive probe: {probe_name}")
+
+                    except Exception as e:
+                        self.logger.warning(f"Could not check tags for {probe_name}: {e}")
                 else:
-                    tag_matches = self.list_probes_by_tag(req)
-                    matched.extend(tag_matches)
+                    # No tag filter - include all inactive probes
+                    selected.append(probe_name)
+                    self.logger.info(f"Including inactive probe: {probe_name}")
 
-        return list(set(matched))
+        return sorted(selected), sorted(rejected)
+
 
     def extract_prompts(
         self,
@@ -186,7 +165,7 @@ class ProbeExtractor:
             try:
                 prompts = self._extract_from_probe(probe_name, max_prompts_per_probe)
                 all_prompts.extend(prompts)
-                self.logger.debug(f"Extracted {len(prompts)} prompts from {probe_name}")
+                self.logger.info(f"Extracted {len(prompts)} prompts from {probe_name}")
             except Exception as e:
                 self.logger.warning(f"Failed to extract from {probe_name}: {e}")
                 if self.verbose:
@@ -202,54 +181,70 @@ class ProbeExtractor:
         self, probe_name: str, max_prompts: Optional[int] = None
     ) -> List[ProbePrompt]:
         """Extract prompts from a single probe."""
-        plugin_name = (
-            probe_name if probe_name.startswith("probes.") else f"probes.{probe_name}"
-        )
-        probe = self._plugins.load_plugin(plugin_name, config_root=self._config)
+        # Save current random state, then set deterministic seed for this probe
+        # This ensures each probe gets consistent random samples without affecting other probes
+        import random
+        import hashlib
 
-        prompts = []
-        probe_tags = getattr(probe, "tags", [])
+        # Save the current random state
+        saved_state = random.getstate()
 
-        clean_name = probe_name.replace("probes.", "", 1)
-        parts = clean_name.split(".")
-        module = parts[0] if parts else "unknown"
+        try:
+            # Set seed based on probe name for deterministic sampling
+            seed = int(hashlib.md5(probe_name.encode()).hexdigest()[:8], 16)
+            random.seed(seed)
 
-        prompt_texts = []
+            plugin_name = (
+                probe_name if probe_name.startswith("probes.") else f"probes.{probe_name}"
+            )
+            probe = self._plugins.load_plugin(plugin_name, config_root=self._config)
 
-        if hasattr(probe, "prompts") and probe.prompts:
-            prompt_texts.extend(probe.prompts)
+            probe_tags = getattr(probe, "tags", [])
 
-        if hasattr(probe, "triggers") and probe.triggers:
-            prompt_texts.extend(probe.triggers)
+            clean_name = probe_name.replace("probes.", "", 1)
+            parts = clean_name.split(".")
+            module = parts[0] if parts else "unknown"
 
-        if not prompt_texts:
-            try:
-                if hasattr(probe, "__bases__"):
-                    instance = probe()
-                    if hasattr(instance, "prompts") and instance.prompts:
-                        prompt_texts.extend(instance.prompts)
-                    if hasattr(instance, "triggers") and instance.triggers:
-                        prompt_texts.extend(instance.triggers)
-            except Exception as e:
-                self.logger.debug(f"Could not instantiate {probe_name}: {e}")
+            # Garak's load_plugin returns an instantiated probe object
+            # Probes have 'prompts' (inputs to test) and optionally 'triggers' (expected outputs for detection)
+            # We only extract prompts - triggers are detection targets, not test inputs
+            prompt_texts = []
+            if hasattr(probe, "prompts") and probe.prompts:
+                try:
+                    prompt_texts = list(probe.prompts)
+                except (TypeError, StopIteration) as e:
+                    self.logger.warning(f"Failed to iterate prompts for {probe_name}: {e}")
+                    prompt_texts = []
 
-        if max_prompts:
-            prompt_texts = prompt_texts[:max_prompts]
+            # Optionally deduplicate prompt texts while preserving order
+            if self.deduplicate:
+                seen = set()
+                unique_texts = []
+                for text in prompt_texts:
+                    if isinstance(text, str) and text.strip() and text not in seen:
+                        seen.add(text)
+                        unique_texts.append(text)
+            else:
+                # No deduplication - just filter out non-strings and empty strings
+                unique_texts = [text for text in prompt_texts if isinstance(text, str) and text.strip()]
 
-        for text in prompt_texts:
-            if isinstance(text, str) and text.strip():
-                prompts.append(
-                    ProbePrompt(
-                        text=text,
-                        probe_name=probe_name,
-                        probe_class=getattr(probe, "__name__", probe_name),
-                        module=module,
-                        tags=probe_tags,
-                        metadata={},
-                    )
+            if max_prompts:
+                unique_texts = unique_texts[:max_prompts]
+
+            return [
+                ProbePrompt(
+                    text=text,
+                    probe_name=probe_name,
+                    probe_class=type(probe).__name__,
+                    module=module,
+                    tags=probe_tags,
+                    metadata={},
                 )
-
-        return prompts
+                for text in unique_texts
+            ]
+        finally:
+            # Always restore the random state, even if extraction failed
+            random.setstate(saved_state)
 
     def get_taxonomy_structure(
         self, prompts: List[ProbePrompt], taxonomy: Optional[str] = None
@@ -494,6 +489,15 @@ class ProbeExtractor:
                 task = future_to_task[future]
                 try:
                     generated_texts = future.result()
+                    actual_count = len(generated_texts)
+                    expected_count = task["batch_count"]
+
+                    if actual_count < expected_count:
+                        self.logger.warning(
+                            f"LLM generated {actual_count} prompts but {expected_count} were requested "
+                            f"for category {task['category_name']}"
+                        )
+
                     for text in generated_texts[: task["batch_count"]]:
                         benign_prompts.append(
                             ProbePrompt(
@@ -516,9 +520,24 @@ class ProbeExtractor:
                         f"Failed to generate benign prompts for category {task['category_name']}: {e}"
                     )
 
+        expected_total = sum(cat["count"] for cat in categories.values())
+        actual_total = len(benign_prompts)
+
         self.logger.info(
-            f"Generated {len(benign_prompts)} category-specific benign prompts"
+            f"Generated {actual_total} category-specific benign prompts (expected: {expected_total})"
         )
+
+        if actual_total < expected_total:
+            shortfall = expected_total - actual_total
+            self.logger.warning(
+                f"Generated {shortfall} fewer benign prompts than expected. "
+                f"This may be due to LLM not generating requested number of prompts per batch."
+            )
+            print(
+                f"⚠️  Warning: Generated {actual_total} benign prompts but expected {expected_total} "
+                f"({shortfall} short). The LLM may not be generating enough prompts per request."
+            )
+
         return benign_prompts
 
     def _generate_batch(
@@ -528,17 +547,24 @@ class ProbeExtractor:
         llm_config: Dict[str, Any],
     ) -> List[str]:
         """Generate a single batch of prompts via LLM (called in parallel)."""
+        # Calculate max_tokens based on batch size (estimate ~80 tokens per prompt)
+        # Extract count from prompt
+        import re
+        match = re.search(r'Generate (\d+)', batch_prompt)
+        expected_count = int(match.group(1)) if match else 10
+        calculated_max_tokens = max(500, expected_count * 80)
+
         response = client.chat.completions.create(
             model=llm_config["model_name"],
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful assistant that generates legitimate, harmless user queries.",
+                    "content": "You are a helpful assistant that generates legitimate, harmless user queries. Generate EXACTLY the number of questions requested, one per line.",
                 },
                 {"role": "user", "content": batch_prompt},
             ],
             temperature=llm_config.get("temperature", 0.7),
-            max_tokens=llm_config.get("max_tokens", 500),
+            max_tokens=llm_config.get("max_tokens", calculated_max_tokens),
             n=1,
         )
 
