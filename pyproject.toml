@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "guardrails-eval"
+version = "0.1.0"
+description = "Benchmarking framework for evaluating AI guardrail/detector systems using garak probes"
+requires-python = ">=3.8"
+dependencies = [
+    "garak",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "tqdm>=4.65.0",
+    "openai>=1.0.0",
+]
+
+[project.scripts]
+guardrails-eval = "guardrails_eval:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "guardrails_eval"]
