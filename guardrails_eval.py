@@ -87,6 +87,16 @@ def main(arguments=None):
         action="store_true",
         help="generate category-specific benign prompts using LLM (same count as adversarial per category). Requires benign_llm config in detectors.yaml.",
     )
+    parser.add_argument(
+        "--include_inactive",
+        action="store_true",
+        help="include inactive 'Full' probes (e.g., DanInTheWildFull with 665 prompts instead of DanInTheWild with 64). WARNING: This can generate 10,000+ prompts and take much longer to run.",
+    )
+    parser.add_argument(
+        "--no_deduplicate",
+        action="store_true",
+        help="disable deduplication of prompts within each probe. By default, duplicate prompts are removed to avoid redundant testing. Use this flag to keep all prompts including duplicates.",
+    )
 
     # REPORTING
     parser.add_argument(
