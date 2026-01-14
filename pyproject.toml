@@ -18,6 +18,9 @@ dependencies = [
 [project.scripts]
 guardrails-eval = "guardrails_eval:main"
 
+[tool.setuptools]
+py-modules = ["guardrails_eval"]
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*", "guardrails_eval"]
+include = ["src*"]
